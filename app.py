@@ -8,14 +8,16 @@ import csv
 from datetime import datetime, timedelta
 import threading
 import time
+import traceback
 
 app = Flask(__name__)
 app.secret_key = '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'
 CORS(app)
 
-# Файл для хранения пользователей
+# Файлы для хранения данных
 USERS_FILE = 'users.json'
 LAST_UPDATE_FILE = 'last_update.txt'
+REQUESTS_FILE = 'event_requests.json'
 
 def load_users():
     """Загрузка пользователей из файла"""
@@ -36,6 +38,27 @@ def save_users(users):
         return True
     except Exception as e:
         print(f"Ошибка сохранения пользователей: {e}")
+        return False
+
+def load_event_requests():
+    """Загрузка заявок на события"""
+    if os.path.exists(REQUESTS_FILE):
+        try:
+            with open(REQUESTS_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except Exception as e:
+            print(f"Ошибка загрузки заявок: {e}")
+            return []
+    return []
+
+def save_event_requests(requests):
+    """Сохранение заявок на события"""
+    try:
+        with open(REQUESTS_FILE, 'w', encoding='utf-8') as f:
+            json.dump(requests, f, ensure_ascii=False, indent=2)
+        return True
+    except Exception as e:
+        print(f"Ошибка сохранения заявок: {e}")
         return False
 
 def init_default_users():
@@ -371,6 +394,147 @@ updater_thread.start()
 # Инициализируем пользователей
 users = init_default_users()
 
+# Новые API эндпоинты для системы заявок
+@app.route('/api/event-request', methods=['POST'])
+def create_event_request():
+    """Создание заявки на участие в событии"""
+    user = session.get('user')
+    if not user:
+        return jsonify({'status': 'error', 'message': 'Требуется авторизация'}), 401
+    
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'status': 'error', 'message': 'Отсутствуют данные'}), 400
+            
+        event_id = data.get('event_id')
+        event_title = data.get('event_title')
+        
+        print(f"📨 Получена заявка от {user['username']} на событие {event_id}: {event_title}")
+        
+        if not event_id or not event_title:
+            return jsonify({'status': 'error', 'message': 'Не указано событие'}), 400
+        
+        requests = load_event_requests()
+        
+        # Проверяем, нет ли уже такой заявки
+        existing_request = next((r for r in requests if r['username'] == user['username'] and r['event_id'] == event_id), None)
+        if existing_request:
+            return jsonify({'status': 'error', 'message': 'Заявка на это событие уже отправлена'}), 400
+        
+        new_request = {
+            'id': len(requests) + 1,
+            'username': user['username'],
+            'event_id': event_id,
+            'event_title': event_title,
+            'status': 'pending',  # pending, approved, rejected
+            'created_at': datetime.now().isoformat(),
+            'processed_at': None,
+            'processed_by': None
+        }
+        
+        requests.append(new_request)
+        save_event_requests(requests)
+        
+        print(f"✅ Заявка сохранена: {new_request}")
+        
+        return jsonify({'status': 'success', 'message': 'Заявка отправлена на рассмотрение'})
+        
+    except Exception as e:
+        print(f"❌ Ошибка создания заявки: {e}")
+        print(traceback.format_exc())
+        return jsonify({'status': 'error', 'message': 'Ошибка сервера при создании заявки'}), 500
+
+@app.route('/api/event-requests', methods=['GET'])
+def get_event_requests():
+    """Получение списка заявок"""
+    user = session.get('user')
+    if not user:
+        return jsonify({'status': 'error', 'message': 'Требуется авторизация'}), 401
+    
+    try:
+        requests = load_event_requests()
+        
+        if user['role'] == 'admin':
+            # Админ видит все заявки
+            return jsonify({'status': 'success', 'requests': requests})
+        else:
+            # Пользователь видит только свои заявки
+            user_requests = [r for r in requests if r['username'] == user['username']]
+            return jsonify({'status': 'success', 'requests': user_requests})
+            
+    except Exception as e:
+        print(f"❌ Ошибка получения заявок: {e}")
+        return jsonify({'status': 'error', 'message': 'Ошибка сервера'}), 500
+
+@app.route('/api/event-request/<int:request_id>/<action>', methods=['POST'])
+def process_event_request(request_id, action):
+    """Обработка заявки администратором"""
+    user = session.get('user')
+    if not user or user['role'] != 'admin':
+        return jsonify({'status': 'error', 'message': 'Доступ запрещен'}), 403
+    
+    if action not in ['approve', 'reject']:
+        return jsonify({'status': 'error', 'message': 'Неверное действие'}), 400
+    
+    try:
+        requests = load_event_requests()
+        request_to_process = next((r for r in requests if r['id'] == request_id), None)
+        
+        if not request_to_process:
+            return jsonify({'status': 'error', 'message': 'Заявка не найдена'}), 404
+        
+        request_to_process['status'] = 'approved' if action == 'approve' else 'rejected'
+        request_to_process['processed_at'] = datetime.now().isoformat()
+        request_to_process['processed_by'] = user['username']
+        
+        save_event_requests(requests)
+        
+        return jsonify({
+            'status': 'success', 
+            'message': f'Заявка {"одобрена" if action == "approve" else "отклонена"}'
+        })
+        
+    except Exception as e:
+        print(f"❌ Ошибка обработки заявки: {e}")
+        return jsonify({'status': 'error', 'message': 'Ошибка сервера'}), 500
+
+@app.route('/api/my-events', methods=['GET'])
+def get_my_events():
+    """Получение списка одобренных событий пользователя"""
+    user = session.get('user')
+    if not user:
+        return jsonify({'status': 'error', 'message': 'Требуется авторизация'}), 401
+    
+    try:
+        requests = load_event_requests()
+        approved_requests = [r for r in requests if r['username'] == user['username'] and r['status'] == 'approved']
+        
+        # Загружаем данные событий из CSV
+        events_data = []
+        if os.path.exists('events_database.csv'):
+            with open('events_database.csv', 'r', encoding='utf-8-sig') as f:
+                reader = csv.DictReader(f)
+                events_data = list(reader)
+        
+        # Находим события по event_id
+        my_events = []
+        for req in approved_requests:
+            event = next((e for e in events_data if e['номер'] == req['event_id']), None)
+            if event:
+                my_events.append({
+                    **event,
+                    'request_id': req['id'],
+                    'approved_at': req['processed_at']
+                })
+        
+        return jsonify({'status': 'success', 'events': my_events})
+        
+    except Exception as e:
+        print(f"❌ Ошибка получения моих событий: {e}")
+        return jsonify({'status': 'error', 'message': 'Ошибка сервера'}), 500
+
+# Существующие эндпоинты (остаются без изменений)
 @app.route('/')
 def index():
     """Главная страница"""
