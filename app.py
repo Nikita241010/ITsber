@@ -10,7 +10,7 @@ import threading
 import time
 
 app = Flask(__name__)
-app.secret_key = 'your-secret-key-here-change-in-production'
+app.secret_key = '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'
 CORS(app)
 
 # Файл для хранения пользователей
